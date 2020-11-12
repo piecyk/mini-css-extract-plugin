@@ -119,7 +119,9 @@ class CssModule extends webpack.Module {
 if (webpack.util && webpack.util.serialization) {
   webpack.util.serialization.register(
     CssModule,
-    'mini-css-extract-plugin/dist/CssModule',
+    `mini-css-extract-plugin/${
+      process.env.NODE_ENV === 'test' ? 'src' : 'dist'
+    }/CssModule`,
     null,
     {
       serialize(instance, context) {

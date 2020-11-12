@@ -89,137 +89,166 @@ describe('TestCases', () => {
 
   clearDirectory(outputDirectory);
 
+  const currentWebpack = `webpack-${webpack.version[0]}`;
+
   for (const directory of tests) {
     if (!/^(\.|_)/.test(directory)) {
+      const specFunction = /^webpack-/.test(directory)
+        ? new RegExp(`^${currentWebpack}`).test(directory)
+          ? it
+          : it.skip
+        : it;
+
       // eslint-disable-next-line no-loop-func
-      it(`${directory} should compile to the expected result`, (done) => {
-        const directoryForCase = path.resolve(casesDirectory, directory);
-        const outputDirectoryForCase = path.resolve(outputDirectory, directory);
-        // eslint-disable-next-line import/no-dynamic-require, global-require
-        const webpackConfig = require(path.resolve(
-          directoryForCase,
-          'webpack.config.js'
-        ));
-
-        for (const config of [].concat(webpackConfig)) {
-          Object.assign(
-            config,
-            {
-              mode: 'none',
-              context: directoryForCase,
-              output: Object.assign(
-                {
-                  path: outputDirectoryForCase,
-                },
-                config.output
-              ),
-            },
-            config
+      specFunction(
+        `${directory} should compile to the expected result`,
+        async (done) => {
+          const directoryForCase = path.resolve(casesDirectory, directory);
+          const outputDirectoryForCase = path.resolve(
+            outputDirectory,
+            directory
           );
-        }
+          // eslint-disable-next-line import/no-dynamic-require, global-require
+          const webpackConfig = require(path.resolve(
+            directoryForCase,
+            'webpack.config.js'
+          ));
 
-        webpack(webpackConfig, (err, stats) => {
-          if (err) {
-            done(err);
-            return;
+          for (const config of [].concat(webpackConfig)) {
+            Object.assign(
+              config,
+              {
+                mode: 'none',
+                context: directoryForCase,
+                output: Object.assign(
+                  {
+                    path: outputDirectoryForCase,
+                  },
+                  config.output
+                ),
+              },
+              config
+            );
           }
-          if (stats.hasErrors()) {
-            done(new Error(stats.toString()));
-            return;
-          }
 
-          done();
+          const callback = (resolve, reject) => (err, stats) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            if (stats.hasErrors()) {
+              reject(new Error(stats.toString()));
+              return;
+            }
+            if (stats.hasErrors() && stats.hasWarnings()) {
+              reject(
+                new Error(
+                  stats.toString({
+                    context: path.resolve(__dirname, '..'),
+                    errorDetails: true,
+                    warnings: true,
+                  })
+                )
+              );
 
-          if (stats.hasErrors() && stats.hasWarnings()) {
-            done(
-              new Error(
-                stats.toString({
-                  context: path.resolve(__dirname, '..'),
-                  errorDetails: true,
-                  warnings: true,
-                })
-              )
+              return;
+            }
+
+            const expectedDirectory = path.resolve(
+              directoryForCase,
+              'expected'
+            );
+            const expectedDirectoryByVersion = path.join(
+              expectedDirectory,
+              currentWebpack
             );
 
-            return;
-          }
+            if (/^hmr/.test(directory)) {
+              let res = fs
+                .readFileSync(path.resolve(outputDirectoryForCase, 'main.js'))
+                .toString();
 
-          const expectedDirectory = path.resolve(directoryForCase, 'expected');
-          const expectedDirectoryByVersion = path.join(
-            expectedDirectory,
-            `webpack-${webpack.version[0]}`
-          );
+              const date = Date.now().toString().slice(0, 6);
+              const dateRegexp = new RegExp(`${date}\\d+`, 'gi');
 
-          if (/^hmr/.test(directory)) {
-            let res = fs
-              .readFileSync(path.resolve(outputDirectoryForCase, 'main.js'))
-              .toString();
+              res = res.replace(dateRegexp, '');
 
-            const date = Date.now().toString().slice(0, 6);
-            const dateRegexp = new RegExp(`${date}\\d+`, 'gi');
+              if (webpack.version[0] === '4') {
+                const matchAll = res.match(
+                  /var hotCurrentHash = "([\d\w].*)"/i
+                );
+                const replacer = new Array(matchAll[1].length);
 
-            res = res.replace(dateRegexp, '');
+                res = res.replace(
+                  /var hotCurrentHash = "([\d\w].*)"/i,
+                  `var hotCurrentHash = "${replacer.fill('x').join('')}"`
+                );
+              } else {
+                const matchAll = res.match(
+                  /__webpack_require__\.h = \(\) => "([\d\w].*)"/i
+                );
 
-            if (webpack.version[0] === '4') {
-              const matchAll = res.match(/var hotCurrentHash = "([\d\w].*)"/i);
-              const replacer = new Array(matchAll[1].length);
+                const replacer = new Array(matchAll[1].length);
 
-              res = res.replace(
-                /var hotCurrentHash = "([\d\w].*)"/i,
-                `var hotCurrentHash = "${replacer.fill('x').join('')}"`
-              );
-            } else {
-              const matchAll = res.match(
-                /__webpack_require__\.h = \(\) => "([\d\w].*)"/i
-              );
+                res = res.replace(
+                  /__webpack_require__\.h = \(\) => "([\d\w].*)"/i,
+                  `__webpack_require__.h = () => "${replacer
+                    .fill('x')
+                    .join('')}"`
+                );
+              }
 
-              const replacer = new Array(matchAll[1].length);
-
-              res = res.replace(
-                /__webpack_require__\.h = \(\) => "([\d\w].*)"/i,
-                `__webpack_require__.h = () => "${replacer.fill('x').join('')}"`
+              fs.writeFileSync(
+                path.resolve(outputDirectoryForCase, 'main.js'),
+                res
               );
             }
 
-            fs.writeFileSync(
-              path.resolve(outputDirectoryForCase, 'main.js'),
-              res
+            if (fs.existsSync(expectedDirectoryByVersion)) {
+              compareDirectory(
+                outputDirectoryForCase,
+                expectedDirectoryByVersion
+              );
+            } else if (fs.existsSync(expectedDirectory)) {
+              compareDirectory(outputDirectoryForCase, expectedDirectory);
+            }
+
+            const warningsFile = path.resolve(directoryForCase, 'warnings.js');
+
+            if (fs.existsSync(warningsFile)) {
+              const actualWarnings = stats.toString({
+                all: false,
+                warnings: true,
+              });
+              // eslint-disable-next-line global-require, import/no-dynamic-require
+              const expectedWarnings = require(warningsFile);
+
+              expect(
+                actualWarnings
+                  .trim()
+                  .replace(/\*\scss\s(.*)?!/g, '* css /path/to/loader.js!')
+              ).toBe(
+                expectedWarnings
+                  .trim()
+                  .replace(/\*\scss\s(.*)?!/g, '* css /path/to/loader.js!')
+              );
+            }
+
+            resolve();
+          };
+
+          if (/^webpack-5_cache/.test(directory)) {
+            clearDirectory(path.resolve(directoryForCase, '.cache'));
+            await new Promise((resolve, reject) =>
+              webpack(webpackConfig, callback(resolve, reject))
             );
+            clearDirectory(outputDirectoryForCase);
           }
 
-          if (fs.existsSync(expectedDirectoryByVersion)) {
-            compareDirectory(
-              outputDirectoryForCase,
-              expectedDirectoryByVersion
-            );
-          } else if (fs.existsSync(expectedDirectory)) {
-            compareDirectory(outputDirectoryForCase, expectedDirectory);
-          }
-
-          const warningsFile = path.resolve(directoryForCase, 'warnings.js');
-
-          if (fs.existsSync(warningsFile)) {
-            const actualWarnings = stats.toString({
-              all: false,
-              warnings: true,
-            });
-            // eslint-disable-next-line global-require, import/no-dynamic-require
-            const expectedWarnings = require(warningsFile);
-
-            expect(
-              actualWarnings
-                .trim()
-                .replace(/\*\scss\s(.*)?!/g, '* css /path/to/loader.js!')
-            ).toBe(
-              expectedWarnings
-                .trim()
-                .replace(/\*\scss\s(.*)?!/g, '* css /path/to/loader.js!')
-            );
-          }
-
-          done();
-        });
-      }, 10000);
+          webpack(webpackConfig, callback(done, done));
+        },
+        10000
+      );
     }
   }
 });
